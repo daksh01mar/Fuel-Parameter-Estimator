@@ -317,8 +317,8 @@ if run_button:
         results.append({
             "Property": p,
             "Provided": provided_text,
-            "Predicted_mean": f"{m:.3f}",
-            "Predicted_std": std_text
+            "Predicted Value": f"{m:.3f}",
+            "Predicted Deviation": std_text
         })
     res_df = pd.DataFrame(results).set_index("Property")
     st.subheader("Imputer-based predictions")
@@ -398,3 +398,4 @@ if run_button:
 
 st.markdown("---")
 st.caption("This app provides screening-level predictions. For regulatory or safety-critical decisions, confirm values with laboratory measurements.")
+
