@@ -1,9 +1,10 @@
 # app_streamlit.py
 """
-Fully styled Streamlit app for Fuel Property Estimation.
-Robust import for IterativeImputer with fallback to SimpleImputer when necessary.
-Place diesel_properties_clean.xlsx in the same folder (recommended) or the app will try to copy it
-from the fallback local path '/mnt/data/diesel_properties_clean.xlsx'.
+Dark-themed Streamlit app for predicting missing fuel properties.
+- Enter any two or more known properties (leave the rest blank).
+- The app imputes missing properties using IterativeImputer (or SimpleImputer fallback).
+- Shows predicted mean ± std (if IterativeImputer with sampling enabled) or mean only.
+- Uses local dataset 'diesel_properties_clean.xlsx' by default (included in repo or copied from fallback).
 """
 
 import os
@@ -13,7 +14,7 @@ import numpy as np
 import joblib
 import matplotlib.pyplot as plt
 
-# Robust import for IterativeImputer
+# Robust import for IterativeImputer (works across sklearn versions)
 try:
     from sklearn.impute import IterativeImputer
 except Exception:
@@ -21,23 +22,24 @@ except Exception:
         from sklearn.experimental import enable_iterative_imputer  # noqa: F401
         from sklearn.impute import IterativeImputer
     except Exception:
-        # fallback: IterativeImputer not available — we will use SimpleImputer later as fallback
         IterativeImputer = None
 
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import BayesianRidge
+from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.cross_decomposition import PLSRegression
-from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import r2_score
 
-# ---------------------------
+# -----------------------
 # Configuration
-# ---------------------------
-DATA_PATH = "diesel_properties_clean.xlsx"   # recommended to include in repo
-DOWNLOAD_URL = "/mnt/data/diesel_properties_clean.xlsx"  # local fallback path available in environment
+# -----------------------
+# dataset fallback local path (use the uploaded file path)
+DOWNLOAD_URL = "/mnt/data/diesel_properties_clean.xlsx"
+DATA_PATH = "diesel_properties_clean.xlsx"  # recommended to include in repo
+
 IMPUTER_PATH = "imputer.joblib"
 IMPUTER_SCALER_PATH = "imputer_scaler.joblib"
 RF_MODEL_PATH = "rf_model_subset.joblib"
@@ -45,58 +47,66 @@ PLS_MODEL_PATH = "pls_model_subset.joblib"
 SCALER_PATH = "scaler_subset.joblib"
 
 RANDOM_STATE = 42
-RF_N_ESTIMATORS = 300
-PLS_COMPONENTS = 4
 
 ALL_PROPERTIES = ["CN", "D4052", "VISC", "FLASH", "BP50", "FREEZE", "TOTAL"]
 
-# Example spec limits — edit if you have different standard
-SPEC_LIMITS = {
-    "CN": {"min": 51, "direction": "gte"},
-    "D4052": {"min": 820, "max": 845, "direction": "in"},
-    "VISC": {"min": 2.0, "max": 4.5, "direction": "in"},
-    "FLASH": {"min": 55, "direction": "gte"},
-    "BP50": {"min": 245, "max": 350, "direction": "in"},
-    "FREEZE": {"max": -20, "direction": "lte"},
-    "TOTAL": {"max": 10, "direction": "lte"}
+# -----------------------
+# UI theme & CSS (dark)
+# -----------------------
+st.set_page_config(page_title="Fuel Parameter Predictor", layout="centered", initial_sidebar_state="expanded")
+
+dark_css = """
+<style>
+/* Background and fonts */
+body, .stApp, .main {
+    background-color: #0f1720;
+    color: #d1d5db;
 }
-
-QUALITY_WEIGHTS = {
-    "CN": 0.20,
-    "TOTAL": 0.20,
-    "VISC": 0.15,
-    "D4052": 0.15,
-    "FLASH": 0.10,
-    "BP50": 0.10,
-    "FREEZE": 0.10
+/* Sidebar */
+.reportview-container .sidebar-content {
+    background-color: #0b1220;
+    color: #d1d5db;
 }
-
-SAFETY_MARGINS = {
-    "CN": 2.0,
-    "TOTAL": 0.0,
-    "D4052": 0.0,
-    "VISC": 0.0,
-    "FLASH": 2.0,
-    "BP50": 0.0,
-    "FREEZE": 0.0
+/* Headers */
+h1, h2, h3, h4, h5 {
+    color: #e6eef8;
 }
+/* Metric boxes and table styling */
+.stTable td, .stTable th {
+    color: #d1d5db;
+}
+.metric-box {
+    background-color: #0b1220;
+    border: 1px solid #1f2937;
+    padding: 12px;
+    border-radius: 8px;
+}
+/* Buttons */
+.stButton>button {
+    background-color: #1f2937;
+    color: #d1d5db;
+    border-radius: 8px;
+    padding: 0.5rem 1rem;
+}
+.stButton>button:hover {
+    background-color: #111827;
+}
+/* Inputs */
+div[data-baseweb="input"] input {
+    background-color: #0b1220;
+    color: #d1d5db;
+    border: 1px solid #374151;
+    border-radius: 6px;
+}
+/* Download button */
+.css-1lsmgbg.egzxvld0 { background-color:#111827; }
+</style>
+"""
+st.markdown(dark_css, unsafe_allow_html=True)
 
-# ---------------------------
-# Helpers: CSS + file helpers
-# ---------------------------
-def local_css():
-    css = """
-    <style>
-    .stApp { background-color: #F8F9FB; color: #17202A; }
-    .header {text-align: center;}
-    .metric-box { background-color:#ffffff; border-radius:10px; padding:10px; box-shadow: 0 2px 6px rgba(0,0,0,0.08); }
-    .small-muted { color:#566573; font-size:12px; }
-    .big-number { font-size:22px; font-weight:600; color:#1B4F72; }
-    .card { background: linear-gradient(180deg,#ffffff,#fbfdff); padding:10px; border-radius:10px; }
-    </style>
-    """
-    st.markdown(css, unsafe_allow_html=True)
-
+# -----------------------
+# Helper functions
+# -----------------------
 def try_copy_dataset(local_path, fallback):
     if os.path.exists(local_path):
         return local_path
@@ -126,28 +136,21 @@ def load_dataset(path=DATA_PATH, fallback=DOWNLOAD_URL):
     df = df.dropna(how="all")
     return df
 
-# ---------------------------
-# Imputer training / loading
-# ---------------------------
 def train_imputer(df, sample_posterior=False, n_iter=20):
     X = df.values
-    # compute column-wise mean/std ignoring NaNs
     col_mean = np.nanmean(X, axis=0)
     col_std = np.nanstd(X, axis=0)
     col_std[col_std == 0] = 1.0
     Xs = (X - col_mean) / col_std
-    # If IterativeImputer available use it; else use SimpleImputer as fallback (deterministic mean)
     if IterativeImputer is not None:
         imp = IterativeImputer(estimator=BayesianRidge(), max_iter=n_iter,
                                sample_posterior=sample_posterior, random_state=RANDOM_STATE,
                                initial_strategy="mean")
         imp.fit(Xs)
-        joblib.dump(imp, IMPUTER_PATH)
     else:
-        # fallback: SimpleImputer (mean). This won't give multiple-draw uncertainty but is robust.
         imp = SimpleImputer(strategy="mean")
         imp.fit(Xs)
-        joblib.dump(imp, IMPUTER_PATH)
+    joblib.dump(imp, IMPUTER_PATH)
     scaler_info = {"mean": col_mean, "std": col_std}
     joblib.dump(scaler_info, IMPUTER_SCALER_PATH)
     return imp, scaler_info
@@ -172,131 +175,21 @@ def imputer_transform_single(imp, scaler_info, row_dict, n_draws=1):
         x_imp_s = imp.transform(x_s)
         x_imp = (x_imp_s * std) + mean
         draws.append(x_imp.flatten())
-        # if using SimpleImputer (no posterior sampling) multiple draws are identical
     df_draws = pd.DataFrame(draws, columns=ALL_PROPERTIES)
     return df_draws
 
-# ---------------------------
-# Train predictive models (D4052,VISC,TOTAL,FLASH -> CN,BP50,FREEZE)
-# ---------------------------
-def train_predict_models(df_for_models, input_cols, output_cols):
-    X = df_for_models[input_cols].values
-    y = df_for_models[output_cols].values
-    mask = ~np.isnan(X).any(axis=1) & ~np.isnan(y).any(axis=1)
-    Xc = X[mask]
-    yc = y[mask]
-    if len(Xc) < 8:
-        st.error("Not enough complete rows to train predictive models.")
-        st.stop()
-    X_train, X_test, y_train, y_test = train_test_split(Xc, yc, test_size=0.2, random_state=RANDOM_STATE)
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s = scaler.transform(X_test)
-    rf = MultiOutputRegressor(RandomForestRegressor(n_estimators=RF_N_ESTIMATORS, random_state=RANDOM_STATE, n_jobs=-1))
-    rf.fit(X_train_s, y_train)
-    pls = PLSRegression(n_components=min(PLS_COMPONENTS, X_train_s.shape[1]))
-    pls.fit(X_train_s, y_train)
-    joblib.dump(rf, RF_MODEL_PATH)
-    joblib.dump(pls, PLS_MODEL_PATH)
-    joblib.dump(scaler, SCALER_PATH)
-    metrics = {
-        "output_cols": output_cols,
-        "rf_r2": r2_score(y_test, rf.predict(X_test_s), multioutput='raw_values').tolist(),
-        "pls_r2": r2_score(y_test, pls.predict(X_test_s), multioutput='raw_values').tolist()
-    }
-    return rf, pls, scaler, metrics
-
-def rf_predict_with_uncertainty(multi_rf, X_s):
-    per_target_means = []
-    per_target_stds = []
-    for est in multi_rf.estimators_:
-        preds = np.stack([tree.predict(X_s) for tree in est.estimators_], axis=1)
-        per_target_means.append(preds.mean(axis=1))
-        per_target_stds.append(preds.std(axis=1))
-    mean = np.vstack(per_target_means).T
-    std = np.vstack(per_target_stds).T
-    return mean, std
-
-# ---------------------------
-# Quality index & decision logic
-# ---------------------------
-def compute_quality_from_vector(vec_dict, weights=QUALITY_WEIGHTS, specs=SPEC_LIMITS, margins=SAFETY_MARGINS):
-    scores = {}
-    failed_any = False
-    borderline = False
-    for prop, w in weights.items():
-        val = vec_dict.get(prop, np.nan)
-        spec = specs.get(prop, {})
-        direction = spec.get("direction")
-        s = 0.0
-        if np.isnan(val):
-            s = 0.0
-        else:
-            if direction == "gte":
-                minv = spec["min"]
-                denom = (abs(minv)*0.2) if (abs(minv)*0.2)>0 else 10
-                s = np.clip((val - minv)/denom, 0, 1)
-                if val < (minv + margins.get(prop, 0)):
-                    borderline = True
-                if val < minv:
-                    failed_any = True
-            elif direction == "lte":
-                maxv = spec["max"]
-                denom = (abs(maxv)*0.2) if (abs(maxv)*0.2)>0 else 10
-                s = np.clip((maxv - val)/denom, 0, 1)
-                if val > (maxv - margins.get(prop, 0)):
-                    borderline = True
-                if val > maxv:
-                    failed_any = True
-            elif direction == "in":
-                minv = spec["min"]; maxv = spec["max"]
-                if minv <= val <= maxv:
-                    s = 1.0
-                else:
-                    tol = max((maxv-minv)*0.2, 1.0)
-                    if val < minv:
-                        s = np.clip(1 - ((minv - val) / tol), 0, 1)
-                    else:
-                        s = np.clip(1 - ((val - maxv) / tol), 0, 1)
-                    if val < minv or val > maxv:
-                        failed_any = True
-                    else:
-                        borderline = True
-            else:
-                s = 0.0
-        scores[prop] = s
-    total_weight = sum([weights[k] for k in weights if not np.isnan(scores.get(k, np.nan))])
-    if total_weight == 0:
-        quality_index = 0.0
-    else:
-        quality_index = sum([scores[k]*weights[k] for k in weights]) / total_weight
-    quality_score_100 = round(float(quality_index*100), 2)
-    if failed_any:
-        label = "FAIL"
-    elif borderline:
-        label = "CHECK"
-    else:
-        label = "PASS"
-    return quality_score_100, label, scores
-
-# ---------------------------
-# Build the Streamlit UI
-# ---------------------------
-st.set_page_config(page_title="Fuel Quality Estimator", layout="centered", initial_sidebar_state="expanded")
-local_css()
-st.markdown("<div class='header'><h1 style='color:#2E86C1;'>🔥 Fuel Quality Estimator</h1></div>", unsafe_allow_html=True)
-st.markdown("<p style='text-align:center;color:#566573;'>Enter any two or more known fuel parameters — the app will infer the rest and show PASS / CHECK / FAIL.</p>", unsafe_allow_html=True)
-st.markdown("---")
+# -----------------------
+# Page content
+# -----------------------
+st.title("Fuel Parameter Predictor")
+st.write("Enter known fuel parameters (at least two). The app predicts the remaining parameters using multivariate imputation.")
 
 # Sidebar inputs
 with st.sidebar:
-    st.markdown("<div style='padding:12px;border-radius:8px;background:#EBF5FB;'>"
-                "<h3 style='color:#117864;'>🔧 Known Properties (optional)</h3>"
-                "<p class='small-muted'>Enter values you know. Leave unknown fields empty.</p></div>",
-                unsafe_allow_html=True)
-
-    def sidebar_val(name):
-        v = st.text_input(name)
+    st.header("Inputs (optional)")
+    st.write("Provide any two or more known parameters. Leave unknown fields blank.")
+    def sidebar_val(name, placeholder=""):
+        v = st.text_input(name, value=placeholder)
         if v is None or v.strip() == "":
             return None
         try:
@@ -305,24 +198,21 @@ with st.sidebar:
             st.error(f"Invalid numeric value for {name}")
             return None
 
-    CN_in = sidebar_val("Cetane Number (CN)")
-    D4052_in = sidebar_val("Density (D4052) [kg/m³]")
-    VISC_in = sidebar_val("Kinematic Viscosity (VISC) [mm²/s]")
-    FLASH_in = sidebar_val("Flash point (FLASH) [°C]")
+    CN_in = sidebar_val("CN (Cetane Number)")
+    D4052_in = sidebar_val("D4052 (Density) [kg/m³]")
+    VISC_in = sidebar_val("VISC (Kinematic viscosity) [mm²/s]")
+    FLASH_in = sidebar_val("FLASH (Flash point) [°C]")
     BP50_in = sidebar_val("BP50 (T50) [°C]")
-    FREEZE_in = sidebar_val("Freeze point [°C]")
-    TOTAL_in = sidebar_val("Sulfur (TOTAL) [ppm]")
+    FREEZE_in = sidebar_val("FREEZE (Freeze point) [°C]")
+    TOTAL_in = sidebar_val("TOTAL (Sulfur) [ppm]")
 
     st.markdown("---")
-    st.markdown("**Options**")
-    use_draws = st.checkbox("Use multiple imputer draws for uncertainty", value=True)
-    n_draws = st.slider("Imputer draws", 1, 200, 50) if use_draws else 1
-    show_rf = st.checkbox("Show RandomForest predictions", True)
-    show_pls = st.checkbox("Show PLS predictions", True)
-    safety_margin_cn = st.number_input("Safety margin for CN (units)", value=float(SAFETY_MARGINS["CN"]), step=0.5)
-    run_button = st.button("🔍 Predict properties")
+    st.write("Options")
+    use_draws = st.checkbox("Estimate uncertainty using multiple imputer draws", value=True)
+    n_draws = st.slider("Imputer draws", min_value=1, max_value=200, value=50) if use_draws else 1
+    run_button = st.button("Predict")
 
-# main load dataset (used for medians and training)
+# load dataset
 df = load_dataset()
 
 # Build provided dict
@@ -337,138 +227,67 @@ if TOTAL_in is not None: provided["TOTAL"] = TOTAL_in
 
 if run_button:
     if len(provided) < 2:
-        st.warning("Please provide at least two known properties for reliable predictions.")
+        st.warning("Please provide at least two known properties.")
         st.stop()
 
-    # Load or train imputer
+    # ensure imputer exists or train it
     imp, scaler_info = load_imputer()
     if imp is None or scaler_info is None:
         with st.spinner("Training imputer on dataset..."):
-            imp, scaler_info = train_imputer(df, sample_posterior=True, n_iter=25)
-        st.success("Trained imputer saved.")
+            imp, scaler_info = train_imputer(df, sample_posterior=(IterativeImputer is not None), n_iter=30)
+        st.success("Imputer trained and saved.")
 
-    with st.spinner("Running imputer to infer missing properties..."):
-        draws_df = imputer_transform_single(imp, scaler_info, provided, n_draws)
+    with st.spinner("Estimating missing properties..."):
+        draws_df = imputer_transform_single(imp, scaler_info, provided, n_draws=n_draws)
     mean_imputed = draws_df.mean(axis=0)
     std_imputed = draws_df.std(axis=0)
 
-    # prepare inputs for predictive models (D4052,VISC,TOTAL,FLASH)
-    model_inputs = ["D4052", "VISC", "TOTAL", "FLASH"]
-    model_input_vector = []
-    medians = df[model_inputs].median()
-    for c in model_inputs:
-        if c in provided:
-            model_input_vector.append(float(provided[c]))
-        else:
-            model_input_vector.append(float(mean_imputed[c]))
-
-    # Load or train RF/PLS models
-    output_cols = ["CN", "BP50", "FREEZE"]
-    rf = pls = scaler_model = None
-    if os.path.exists(RF_MODEL_PATH) and os.path.exists(PLS_MODEL_PATH) and os.path.exists(SCALER_PATH):
-        try:
-            rf = joblib.load(RF_MODEL_PATH)
-            pls = joblib.load(PLS_MODEL_PATH)
-            scaler_model = joblib.load(SCALER_PATH)
-        except Exception:
-            rf = pls = scaler_model = None
-    if rf is None or pls is None or scaler_model is None:
-        with st.spinner("Training predictive models..."):
-            rf, pls, scaler_model, metrics = train_predict_models(df, model_inputs, output_cols)
-        st.success("Trained predictive models saved.")
-
-    X_user = np.array([model_input_vector])
-    X_user_s = scaler_model.transform(X_user)
-    rf_mean, rf_std = rf_predict_with_uncertainty(rf, X_user_s)
-    rf_mean = rf_mean.flatten()
-    rf_std = rf_std.flatten()
-    pls_pred = pls.predict(X_user_s).flatten()
-
-    # build final predicted vector (primary use: imputer mean for full-vector, but override CN/BP50/FREEZE with RF_mean)
-    final_preds = mean_imputed.to_dict()
-    final_preds["CN"] = float(rf_mean[0])
-    final_preds["BP50"] = float(rf_mean[1])
-    final_preds["FREEZE"] = float(rf_mean[2])
-
-    # compute quality index
-    local_weights = QUALITY_WEIGHTS.copy()
-    local_margins = SAFETY_MARGINS.copy()
-    local_margins["CN"] = float(safety_margin_cn)
-    quality_score, decision_label, per_prop_scores = compute_quality_from_vector(final_preds, weights=local_weights, specs=SPEC_LIMITS, margins=local_margins)
-
-    # Display results
-    st.markdown("## ✅ Results")
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown(f"**Quality Score**  \n**{quality_score} / 100**")
-        st.caption("Weighted index across properties")
-    with col2:
-        color = "green" if decision_label=="PASS" else ("orange" if decision_label=="CHECK" else "red")
-        st.markdown(f"**Decision**  \n<span style='color:{color};font-weight:700'>{decision_label}</span>", unsafe_allow_html=True)
-        st.caption("PASS / CHECK / FAIL (conservative)")
-    with col3:
-        st.markdown("**Notes**")
-        st.caption("Imputer + RF used. PLS for comparison.")
-
-    st.markdown("### Predicted properties (Imputer mean ± std; RF and PLS for CN/BP50/FREEZE)")
-    rows = []
+    # Display results in a clean table
+    results = []
     for p in ALL_PROPERTIES:
-        im_m = mean_imputed[p]
-        im_s = std_imputed[p]
-        rf_val = ""
-        rf_s = ""
-        pls_v = ""
-        if p in output_cols:
-            idx = output_cols.index(p)
-            rf_val = f"{rf_mean[idx]:.3f}"
-            rf_s = f"±{rf_std[idx]:.3f}"
-            pls_v = f"{pls_pred[idx]:.3f}"
-        rows.append({
+        m = mean_imputed[p]
+        s = std_imputed[p]
+        if n_draws <= 1:
+            std_text = "-"
+        else:
+            std_text = f"{s:.3f}"
+        provided_text = f"{provided[p]:.3f}" if p in provided else "-"
+        results.append({
             "Property": p,
-            "Imputer_mean": f"{im_m:.3f}",
-            "Imputer_std": f"{im_s:.3f}",
-            "RF_pred": rf_val,
-            "RF_std": rf_s,
-            "PLS_pred": pls_v
+            "Provided": provided_text,
+            "Predicted_mean": f"{m:.3f}",
+            "Predicted_std": std_text
         })
-    st.table(pd.DataFrame(rows).set_index("Property"))
+    res_df = pd.DataFrame(results).set_index("Property")
 
-    # Quick metrics if present
-    try:
-        if 'metrics' in locals():
-            m = metrics
-            metrics_df = pd.DataFrame({
-                "Output": m["output_cols"],
-                "RF_R2": [round(v,3) for v in m["rf_r2"]],
-                "PLS_R2": [round(v,3) for v in m["pls_r2"]]
-            }).set_index("Output")
-            st.markdown("### Quick model metrics (held-out)")
-            st.table(metrics_df)
-    except Exception:
-        pass
+    st.subheader("Predictions (imputer)")
+    st.table(res_df)
 
-    payload = {**provided}
-    for k in ALL_PROPERTIES:
-        payload[f"{k}_imputer_mean"] = float(mean_imputed[k])
-        payload[f"{k}_imputer_std"] = float(std_imputed[k])
-    for i,k in enumerate(output_cols):
-        payload[f"{k}_rf"] = float(rf_mean[i])
-        payload[f"{k}_rf_std"] = float(rf_std[i])
-        payload[f"{k}_pls"] = float(pls_pred[i])
-    payload["quality_score"] = quality_score
-    payload["decision"] = decision_label
-    st.download_button("⬇️ Download prediction CSV", pd.DataFrame([payload]).to_csv(index=False).encode('utf-8'), file_name="fuel_prediction.csv", mime="text/csv")
-
-    if st.checkbox("Show training scatter plots (density vs outputs)"):
-        fig, axs = plt.subplots(1,3,figsize=(12,3))
-        axs[0].scatter(df["D4052"], df["CN"], alpha=0.6); axs[0].set_xlabel("D4052"); axs[0].set_ylabel("CN")
-        axs[1].scatter(df["D4052"], df["BP50"], alpha=0.6); axs[1].set_xlabel("D4052"); axs[1].set_ylabel("BP50")
-        axs[2].scatter(df["D4052"], df["FREEZE"], alpha=0.6); axs[2].set_xlabel("D4052"); axs[2].set_ylabel("FREEZE")
+    # Optionally show scatter plots for context (density vs others)
+    if st.checkbox("Show exploratory plots (training data)"):
+        fig, axs = plt.subplots(1, 3, figsize=(12, 3))
+        axs[0].scatter(df["D4052"], df["CN"], alpha=0.6, color="#9CA3AF")
+        axs[0].set_xlabel("D4052"); axs[0].set_ylabel("CN")
+        axs[1].scatter(df["D4052"], df["BP50"], alpha=0.6, color="#9CA3AF")
+        axs[1].set_xlabel("D4052"); axs[1].set_ylabel("BP50")
+        axs[2].scatter(df["D4052"], df["FREEZE"], alpha=0.6, color="#9CA3AF")
+        axs[2].set_xlabel("D4052"); axs[2].set_ylabel("FREEZE")
+        fig.patch.set_facecolor('#0f1720')
+        for ax in axs:
+            ax.set_facecolor('#0b1220')
+            ax.tick_params(colors='#d1d5db')
+            ax.xaxis.label.set_color('#d1d5db')
+            ax.yaxis.label.set_color('#d1d5db')
         st.pyplot(fig)
 
-    st.markdown("---")
-    st.markdown("#### Notes")
-    st.markdown("* Use predictions for screening; confirm borderline samples in lab. *")
-    st.success("Prediction complete.")
+    # Download button
+    out_payload = {}
+    out_payload.update({f"provided_{k}": v for k, v in provided.items()})
+    for p in ALL_PROPERTIES:
+        out_payload[f"{p}_pred_mean"] = float(mean_imputed[p])
+        out_payload[f"{p}_pred_std"] = float(std_imputed[p])
+    pd_out = pd.DataFrame([out_payload])
+    st.download_button("Download predictions (CSV)", pd_out.to_csv(index=False).encode('utf-8'), file_name="predictions.csv", mime="text/csv")
 
-st.markdown("<hr><p style='text-align:center;color:gray'>Built with ❤️ — Streamlit • Fuel Quality Project</p>", unsafe_allow_html=True)
+st.markdown("---")
+st.caption("This app provides screening-level predictions. For critical decisions, confirm with laboratory tests.")
